@@ -163,15 +163,17 @@ func (c *Client) Do(r *retryablehttp.Request, result interface{}) (*Response, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	response := &Response{resp}
 	if err = response.ExtractError(); err != nil {
+		resp.Body.Close()
 		return nil, err
 	}
 	if result != nil {
 		if err = json.NewDecoder(resp.Body).Decode(result); err != nil {
+			resp.Body.Close()
 			return nil, err
 		}
+		resp.Body.Close()
 	}
 	return response, nil
 }
@@ -181,7 +183,13 @@ func (c *Client) ExecuteRequest(method, path string, opt, result interface{}) (*
 	if err != nil {
 		return nil, err
 	}
-	return c.Do(req, result)
+	resp, err := c.Do(req, result)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body.Close()
+
+	return resp, nil
 }
 
 func defaultRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {

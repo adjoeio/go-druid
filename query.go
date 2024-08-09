@@ -16,6 +16,8 @@ type QueryService struct {
 	client *Client
 }
 
+// Execute executes a query and returns the result.
+// Do not forget to close the response body if result is nil.
 func (q *QueryService) Execute(qry builder.Query, result interface{}, headers ...http.Header) (*Response, error) {
 	var path string
 	switch qry.Type() {
