@@ -224,9 +224,18 @@ func defaultRetry(ctx context.Context, resp *http.Response, err error) (bool, er
 		return false, nil
 	}
 
-	switch resp.StatusCode {
-	case http.StatusGatewayTimeout:
-		return true, fmt.Errorf("gateway timeout")
+	// A 504 means the request already timed out, so a retry repeats the same expensive work.
+	if resp.StatusCode == http.StatusGatewayTimeout {
+		body, err := ioutil.ReadAll(io.LimitReader(resp.Body, respReadLimit))
+		resp.Body.Close()
+		if err != nil {
+			return false, fmt.Errorf("gateway timeout: failed to read the response from Druid: %w", err)
+		}
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			return false, fmt.Errorf("gateway timeout")
+		}
+		return false, fmt.Errorf("gateway timeout: %s", msg)
 	}
 
 	body, err := ioutil.ReadAll(resp.Body)

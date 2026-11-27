@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -102,12 +105,10 @@ func TestDefaultRetry(t *testing.T) {
 	b = `{
 		"error": "Query timeout", "errorMessage" : "Something bad happened."
 	}`
-	expectedErr = fmt.Errorf("error response from Druid: {Error:Query timeout ErrorMessage:Something bad happened. ErrorClass: Host:}")
 	resp = buildMockResp(504, b)
 	retry, err = defaultRetry(ctx, &resp, nil)
-	assert.NotNil(t, err)
-	assert.Equal(t, expectedErr, err)
-	assert.True(t, retry)
+	assert.EqualError(t, err, "gateway timeout: "+strings.TrimSpace(b))
+	assert.False(t, retry)
 
 	b = `{
 		"error": "Query cancelled", "errorMessage" : "Something bad happened."
@@ -136,6 +137,54 @@ func TestDefaultRetry(t *testing.T) {
 	assert.NotNil(t, err)
 	assert.Equal(t, expectedErr.Error(), err.Error())
 	assert.True(t, retry)
+}
+
+func TestDefaultRetryGatewayTimeoutEmptyBody(t *testing.T) {
+	resp := buildMockResp(504, "")
+	retry, err := defaultRetry(context.TODO(), &resp, nil)
+	assert.EqualError(t, err, "gateway timeout")
+	assert.False(t, retry)
+}
+
+func TestDefaultRetryGatewayTimeoutBodyIsLimited(t *testing.T) {
+	resp := buildMockResp(504, strings.Repeat("a", 5000))
+	retry, err := defaultRetry(context.TODO(), &resp, nil)
+	assert.Len(t, err.Error(), len("gateway timeout: ")+4096)
+	assert.False(t, retry)
+}
+
+func TestQueryNotRetriedOnGatewayTimeout(t *testing.T) {
+	var count int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&count, 1)
+		w.WriteHeader(http.StatusGatewayTimeout)
+		fmt.Fprint(w, `{"error":"Query timeout"}`)
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(srv.URL, WithRetryWaitMin(time.Millisecond), WithRetryWaitMax(time.Millisecond))
+	assert.Nil(t, err)
+	_, err = c.ExecuteRequest("POST", "druid/v2", map[string]string{}, nil)
+	assert.NotNil(t, err)
+	assert.Contains(t, err.Error(), "gateway timeout")
+	assert.Contains(t, err.Error(), "Query timeout")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&count))
+}
+
+func TestQueryRetriedOnServiceUnavailable(t *testing.T) {
+	var count int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&count, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":"Query capacity exceeded"}`)
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(srv.URL, WithRetryWaitMin(time.Millisecond), WithRetryWaitMax(time.Millisecond))
+	assert.Nil(t, err)
+	_, err = c.ExecuteRequest("POST", "druid/v2", map[string]string{}, nil)
+	assert.NotNil(t, err)
+	assert.Equal(t, int32(6), atomic.LoadInt32(&count))
 }
 
 func buildMockResp(statusCode int, body string) http.Response {
